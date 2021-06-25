@@ -57,6 +57,7 @@ data PostMeta = PostMeta
   -- ^ File path (relative) to the post.
   , metaTitle :: T.Text
   , metaAuthor :: Maybe T.Text
+  -- ^ Can be Nothing because of default author entry in the config `ini`.
   , metaTags :: Maybe [T.Text]
   , metaFrontMatter :: FrontMatter
   -- ^ All of the FrontMatter.
@@ -71,13 +72,11 @@ pairToPostMeta (filePath, Just frontMatter) = Just $ PostMeta
   , metaPath = T.pack filePath
   , metaTitle = fromJust $ fmTitle frontMatter
   , metaAuthor = fmAuthor frontMatter
-  -- ^ Can be Nothing because of default author entry in .ini
   , metaTags = fmTags frontMatter
   , metaFrontMatter = frontMatter
   }
 pairToPostMeta (_, Nothing) = Nothing
 
--- must filter out non post types FIXME
 -- | Filters out non-posts based on the type: post.
 preparePostsOnlyFromPairs :: [FileFrontMatter] -> [PostMeta]
 preparePostsOnlyFromPairs filePathFrontMatterPairs = do
@@ -132,6 +131,22 @@ data AtomFeedEntryRecipe = AtomFeedEntryRecipe
   , entryPhlogConfig :: PhlogConfig
   }
 
+
+-- | Get the URI which points to this gopherhole using the phlog config info.
+--
+-- >>> :{
+--  let
+--    phlogConfig =
+--      PhlogConfig
+--        { phlogPath="phlog/"
+--        , phlogTagPath="tag/"
+--        , phlogDefaultAuthor="foo"
+--        , phlogHost="example.org"
+--        , phlogPort="70"
+--        }
+--  in baseURL phlogConfig
+-- :}
+-- "gopher://example.org:70/"
 baseURL :: PhlogConfig -> String
 baseURL phlogConfig =
   "gopher://" ++ phlogHost phlogConfig ++ ":" ++ phlogPort phlogConfig ++ "/"
@@ -182,7 +197,6 @@ createAtomFeed atomFeedRecipe = do
     , XML.documentEpilogue = def
     }
 
--- TODO: look for patterns throughout all the instances and automate it here
 -- | Represents different kinds of phlog indexes and the tools required to do
 -- things with them.
 --
@@ -236,12 +250,8 @@ instance PhlogIndex [PostMeta] MainPhlogIndex where
       _ <- ask
       pure $ postMetasPairs
 
+  -- | Create the main phlog index which includes all the posts sorted by date.
   renderIndexGophermap (MainPhlogIndex mainPhlogIndex) = do
-    -- TODO: list main tag index
-    -- TODO: 
-    --  createDirectoryIfMissing True (takeDirectory mainTagIndexPath)
-    -- FIXME: directories need to be defined in config
-    -- | Create the main phlog index which includes all the posts sorted by date.
     currentYear <- getCurrentYear
     configParser <- getConfig
     buildPath <- getConfigValue configParser "general" "buildPath"
@@ -287,10 +297,6 @@ sortOnDate :: Integer -> [PostMeta] -> [PostMeta]
 sortOnDate _ = sortOn metaUpdated
 
 
--- FIXME TODO
--- in the future also should look more like a hashmap of tag to [(filepath, frontmatter)]
--- in fact passing the sorted tag index could be something handy to have as reader in both instances
--- for efficiency
 newtype MainTagIndex = MainTagIndex (HashMap.HashMap Tag [PostMeta])
 
 -- FIXME/TODO: there's a TON of overlap between this and the other tag indexes so write some helper functions
@@ -364,9 +370,6 @@ instance PhlogIndex [PostMeta] MainTagIndex where
     XML.writeFile def (buildPath </> atomRelativePath) atomFeed
 
 
--- FIXME: this no longer makes sense the way it compiles results.
--- this one could be more general like PostMetasCriterion for cats and authors etc
---newtype PostMetasTag = PostMetasTag (Tag, PostMetas)
 newtype SpecificTagIndex = SpecificTagIndex (Tag, [PostMeta])
 
 instance PhlogIndex (PostMetasGroupPair Tag) SpecificTagIndex where
@@ -409,24 +412,36 @@ instance PhlogIndex (PostMetasGroupPair Tag) SpecificTagIndex where
     XML.writeFile def outputPath atomFeed
 
 
+-- | Currently I just use this for grouping together the (group label [like
+-- "tag"], actual group value [like "recipes"], and finally the list of
+-- PostMetas belonging to the group).
 newtype PostMetasGroupPair a = PostMetasGroupPair (String, a, [PostMeta]) -- this is what get accepted by the thingy builder
+
+-- | A bunch of `PostMetas` that have been grouped together based on some criteria.
 newtype PostMetasGroup a = PostMetasGroup (String, HashMap.HashMap a [PostMeta]) deriving (Show)
 
 
+-- | Create a single `PostMetasGroupPair` using a key to do a lookup from the
+-- results of grouping `PostMetas` together into a `PostMetasGroup`.
 getPostMetasGroupPair :: (Eq a, Hashable a) => PostMetasGroup a -> a -> PostMetasGroupPair a
 getPostMetasGroupPair (PostMetasGroup (label, hashMap)) key =
   -- FIXME: fromjust
   PostMetasGroupPair (label, key, fromJust $ HashMap.lookup key hashMap)
 
--- | Group posts together by some property of the FrontMatter. Weeds out posts
--- without FrontMatter.
+
+-- | Group posts together by some property of the `PostMeta`.
 --
--- If you're not getting a value that is a list you can use Identity as the return
--- value. 
+-- If you're not getting a value that is a list you can use Identity as the
+-- return value. You can also rely on record functions that have a type of
+-- `Maybe a`.
 --
 -- >>> import Data.Functor.Identity (Identity(..))
--- >>> (frontMatterHashMapGroup somePostMetas ("title", Identity . title) :: (String, HashMap.HashMap (Maybe T.Text) [PostMeta))
--- >>> (frontMatterHashMapGroup somePostMetas ("tag", tags) :: (String, HashMap.HashMap Tag [PostMeta]))
+-- >>> frontMatterHashMapGroup postMetas ("title", Identity . metaTitle) :: PostMetasGroup T.Text
+-- PostMetasGroup ("title",fromList [...,("Duplicate Post Title",[PostMeta {...metaPath = "duplicate-post-title2.txt", metaTitle = "Duplicate Post Title"...},PostMeta {...metaPath = "duplicate-post-title.txt", metaTitle = "Duplicate Post Title"...}]),...,...)
+-- >>> frontMatterHashMapGroup postMetas ("author", metaAuthor) :: PostMetasGroup T.Text
+-- PostMetasGroup ("author",fromList [("Computer Nerd",[PostMeta {...metaPath = "unix-release.txt", metaTitle = "Unix is Released Today!", metaAuthor = Just "Computer Nerd"...}]),("A Video Game Fan",[PostMeta {...metaPath = "mario-release.txt", metaTitle = "Mario is Released Today!", metaAuthor = Just "A Video Game Fan",...},PostMeta {...metaPath = "zelda-release.txt", metaTitle = "Zelda is Released Today!", metaAuthor = Just "A Video Game Fan",...}])])
+-- >>> frontMatterHashMapGroup postMetas ("tag", \pm -> fromMaybe [] (metaTags pm)) :: PostMetasGroup Tag
+-- PostMetasGroup ("tag",fromList [("computing",[PostMeta {...metaTitle = "Unix is Released Today!",...metaTags = Just ["computing"], ...}]),("games",[PostMeta {...metaTitle = "Mario is Released Today!",...metaTags = Just ["games","nintendo"],...},PostMeta {...metaTitle = "Zelda is Released Today!",...metaTags = Just ["games","nintendo"],...}]),("nintendo",[PostMeta {...metaTitle = "Mario is Released Today!"...metaTags = Just ["games","nintendo"],...},PostMeta {...metaTitle = "Zelda is Released Today!",...metaTags = Just ["games","nintendo"],...}])])
 frontMatterHashMapGroup
   :: (Eq a, Hashable a, Foldable f)
   => [PostMeta]
@@ -436,6 +451,7 @@ frontMatterHashMapGroup postMetaList (groupName, groupFunction) =
   PostMetasGroup $ (groupName, HashMap.fromListWith (++) result)
  where
   result =
+    -- FIXME: will group tags ([foo, bar]: postmetas)... logically it shouldn't, though...
     [ (group, [postMeta]) | postMeta <- postMetaList, group <- (toList $ groupFunction postMeta)]
 
 
@@ -446,22 +462,26 @@ frontMatterHashMapGroup postMetaList (groupName, groupFunction) =
 renderTagIndexes :: [FileFrontMatter] -> IO ()
 renderTagIndexes filePathFrontMatter = do
   let postMetaList = preparePostsOnlyFromPairs filePathFrontMatter
-      -- FIXME/TODO: I filter out no tags instead of putting into [] group?
       ppmg@(PostMetasGroup (_, hashMap)) = (frontMatterHashMapGroup postMetaList ("tag", \pm -> fromMaybe [] (metaTags pm)) :: PostMetasGroup Tag)
       tagsFound = HashMap.keys hashMap
   -- Only render tag indexes if there are any tags to render.
   if length tagsFound > 0
      then do
+      -- Render the specific tag indexes using the tags we found and apply the
+      -- "renderAll" from the PhlogIndex SpecificTagIndex instance.
       traverse_ (\x -> renderAll (createIndexModel $ getPostMetasGroupPair ppmg x :: SpecificTagIndex)) tagsFound
+      -- Render the main tag index (summary of tags).
       let mainTagIndex = createIndexModel (preparePostsOnlyFromPairs filePathFrontMatter) :: MainTagIndex
       renderAll mainTagIndex
      else pure ()
 
 
 -- FIXME: pass the menu suffix here (file extension)
--- UH OH NOT USING SPECIFIC SUFFIXES FOR MENUS VS REGULAR FILES RESULTS IN THIS HEADACHE!
 -- | A useful tool in making phlog indexes: create a nice link for the menu
 -- using a supplied pair from PostMetas.
+--
+-- >>> makeLocalLink postMeta
+-- "0Zelda is Released Today!\t/zelda-release.txt"
 makeLocalLink :: PostMeta -> String
 makeLocalLink postMeta
   -- FIXME: hardcoded "menu"
@@ -491,16 +511,112 @@ data MenuLink = MenuLink
 -- gopherfiletypeNAME\t [SELECTOR [\tSERVER [\tPORT]]]
 --
 -- https://sternenseemann.github.io/spacecookie/spacecookie.gophermap.5.html
+--
+-- >>> :{
+--  let
+--    menuLink = MenuLink
+--      { linkType="0"
+--      , displayString="Apple Pie Recipe"
+--      , selector="recipe.txt"
+--      , server=Just "example.org"
+--      , port=Just 70
+--      }
+--  in show menuLink
+-- :}
+-- "0Apple Pie Recipe\t/recipe.txt\texample.org\t70"
 instance Show MenuLink where
   show ml =
     let firstPart =
           intercalate "\t"
             [ (linkType ml) ++ (displayString ml)
-            , "/" ++ (selector ml)
+            , "/" ++ (selector ml) -- FIXME: join path?
             ]
         secondPart =
           fromMaybe "" (server ml >>= \x -> port ml >>= \y -> Just $ "\t" ++ x ++ "\t" ++ (show y))
     in firstPart ++ secondPart
+
+-- $setup
+-- >>> :set -XOverloadedStrings
+-- >>> import Time.Types
+-- >>> :{
+--  let
+--    dateTime = DateTime (Date 1986 February 21) (TimeOfDay 0 0 0 0)
+--    frontMatter =
+--      FrontMatter 
+--        (Just dateTime)
+--        (Just dateTime)
+--        (Just "Zelda is Released Today!")
+--        (Just "A Video Game Fan")
+--        (Just ["games", "nintendo"])
+--        (Just "post")
+--        Nothing
+--        Nothing
+--        Nothing
+--        Nothing
+--        Nothing
+--    postMeta = fromJust . pairToPostMeta $ ("zelda-release.txt", Just frontMatter)
+--    dateTime2 = DateTime (Date 1985 September 13) (TimeOfDay 0 0 0 0)
+--    frontMatter2 =
+--      FrontMatter 
+--        (Just dateTime2)
+--        (Just dateTime2)
+--        (Just "Mario is Released Today!")
+--        (Just "A Video Game Fan")
+--        (Just ["games", "nintendo"])
+--        (Just "post")
+--        Nothing
+--        Nothing
+--        Nothing
+--        Nothing
+--        Nothing
+--    postMeta2 = fromJust . pairToPostMeta $ ("mario-release.txt", Just frontMatter2)
+--    dateTime3 = DateTime (Date 1971 November 3) (TimeOfDay 0 0 0 0)
+--    frontMatter3 =
+--      FrontMatter 
+--        (Just dateTime3)
+--        (Just dateTime3)
+--        (Just "Unix is Released Today!")
+--        (Just "Computer Nerd")
+--        (Just ["computing"])
+--        (Just "post")
+--        Nothing
+--        Nothing
+--        Nothing
+--        Nothing
+--        Nothing
+--    postMeta3 = fromJust . pairToPostMeta $ ("unix-release.txt", Just frontMatter3)
+--    dateTime4 = DateTime (Date 2021 June 19) (TimeOfDay 20 36 0 0)
+--    frontMatter4 =
+--      FrontMatter 
+--        (Just dateTime4)
+--        (Just dateTime4)
+--        (Just "Duplicate Post Title")
+--        Nothing
+--        Nothing
+--        (Just "post")
+--        Nothing
+--        Nothing
+--        Nothing
+--        Nothing
+--        Nothing
+--    postMeta4 = fromJust . pairToPostMeta $ ("duplicate-post-title.txt", Just frontMatter4)
+--    dateTime5 = DateTime (Date 2021 June 10) (TimeOfDay 06 25 0 0)
+--    frontMatter5 =
+--      FrontMatter 
+--        (Just dateTime5)
+--        (Just dateTime5)
+--        (Just "Duplicate Post Title")
+--        Nothing
+--        Nothing
+--        (Just "post")
+--        Nothing
+--        Nothing
+--        Nothing
+--        Nothing
+--        Nothing
+--    postMeta5 = fromJust . pairToPostMeta $ ("duplicate-post-title2.txt", Just frontMatter5)
+--    postMetas = [postMeta, postMeta2, postMeta3, postMeta4, postMeta5]
+-- :}
 
 {- $phlogIndexes
 
